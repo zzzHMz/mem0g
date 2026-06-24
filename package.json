@@ -2,19 +2,19 @@
   "name": "mem0g",
   "version": "1.0.0",
   "description": "Mem0G — AI Memory Companion powered by 0G Storage & Compute",
-  "main": "src/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "demo": "DEMO_MODE=true node src/index.js"
+    "demo": "DEMO_MODE=true node src/index.js",
+    "vercel-build": "echo 'Mem0G: ready for Vercel deployment'"
   },
   "dependencies": {
     "express": "^4.21.0",
     "openai": "^6.44.0",
     "dotenv": "^16.4.0",
     "@0glabs/0g-ts-sdk": "^0.3.3",
-    "cors": "^2.8.5",
-    "uuid": "^10.0.0"
+    "ethers": "^6.13.0",
+    "cors": "^2.8.5"
   }
 }

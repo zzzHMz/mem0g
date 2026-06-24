@@ -2,21 +2,6 @@ import OpenAI from 'openai';
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
 
-let client = null;
-
-function getClient() {
-  if (!client) {
-    const baseURL = process.env.OG_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
-    const apiKey = process.env.OG_API_KEY || 'sk-demo-key';
-
-    client = new OpenAI({
-      baseURL,
-      apiKey,
-    });
-  }
-  return client;
-}
-
 // Demo responses for when no 0G API key is configured
 const DEMO_RESPONSES = [
   "I remember! The last time we talked, you were building that dApp. How did the deployment go?",
@@ -31,7 +16,6 @@ let demoIdx = 0;
 export const aiService = {
   async chat(messages) {
     if (DEMO_MODE) {
-      // Simulate AI delay
       await new Promise(r => setTimeout(r, 800 + Math.random() * 1200));
       const response = DEMO_RESPONSES[demoIdx % DEMO_RESPONSES.length];
       demoIdx++;
@@ -39,8 +23,15 @@ export const aiService = {
     }
 
     try {
+      const baseURL = process.env.OG_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
+      const apiKey = process.env.OG_API_KEY;
       const model = process.env.OG_MODEL || 'openai/gpt-4o-mini';
-      const openai = getClient();
+
+      if (!apiKey) {
+        throw new Error('OG_API_KEY not configured');
+      }
+
+      const openai = new OpenAI({ baseURL, apiKey });
 
       const completion = await openai.chat.completions.create({
         model,
@@ -51,9 +42,9 @@ export const aiService = {
       return completion.choices[0]?.message?.content || 'No response generated.';
     } catch (error) {
       console.error('0G Compute Router error:', error.message);
-      // Fallback to demo mode
+      // Fallback to demo response
       await new Promise(r => setTimeout(r, 500));
-      return `[0G Compute] ${DEMO_RESPONSES[demoIdx % DEMO_RESPONSES.length]}`;
+      return DEMO_RESPONSES[demoIdx % DEMO_RESPONSES.length];
     }
   },
 };

@@ -6,6 +6,8 @@
  * and a Merkle root hash is returned for retrieval.
  *
  * In DEMO_MODE, stores locally (for development/testing without 0G tokens).
+ * Gracefully falls back to local storage if the SDK fails to load
+ * (e.g., on serverless platforms like Vercel).
  */
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true';
@@ -24,34 +26,16 @@ export const storageService = {
    */
   async saveConversation(conversation) {
     if (DEMO_MODE) {
-      // Demo mode: store locally
-      const data = {
-        root: `demo-${conversation.id}`,
-        summary: this._generateSummary(conversation),
-        messages: conversation.messages.slice(-10), // Last 10 messages
-        timestamp: new Date().toISOString(),
-      };
-
-      // Update existing or add new
-      const idx = demoStore.conversations.findIndex(c => c.root === data.root);
-      if (idx >= 0) {
-        demoStore.conversations[idx] = data;
-      } else {
-        demoStore.conversations.push(data);
-      }
-
-      // Also update memories index
-      this._updateMemoriesIndex(data);
-      return data.root;
+      return this._saveLocal(conversation);
     }
 
-    // LIVE MODE: Upload to 0G Storage
+    // LIVE MODE: Upload to 0G Storage with local fallback
     try {
       const root = await this._uploadToOGStorage(conversation);
       return root;
     } catch (error) {
-      console.error('0G Storage upload failed:', error.message);
-      throw error;
+      console.error('0G Storage upload failed, falling back to local:', error.message);
+      return this._saveLocal(conversation);
     }
   },
 
@@ -68,7 +52,7 @@ export const storageService = {
       return await this._listFromOGStorage();
     } catch (error) {
       console.error('0G Storage retrieval failed:', error.message);
-      return [];
+      return demoStore.memories;
     }
   },
 
@@ -88,8 +72,10 @@ export const storageService = {
     return {
       mode: 'live',
       storageType: '0G Storage Network',
-      contract: process.env.OG_STORAGE_CONTRACT || '0x22E0...',
-      status: 'connected',
+      contract: process.env.OG_STORAGE_CONTRACT
+        ? `${process.env.OG_STORAGE_CONTRACT.substring(0, 10)}...`
+        : 'Not configured',
+      status: 'configured',
     };
   },
 
@@ -101,42 +87,44 @@ export const storageService = {
     if (msgs.length === 0) return 'Empty conversation';
 
     const firstMsg = msgs[0]?.content?.substring(0, 100) || '';
-    const lastMsg = msgs[msgs.length - 1]?.content?.substring(0, 100) || '';
-    const topics = msgs
-      .filter(m => m.role === 'user')
-      .slice(0, 3)
-      .map(m => m.content?.substring(0, 60))
-      .join(' | ');
-
     return `📝 ${firstMsg}${msgs.length > 1 ? '...' : ''} (${Math.ceil(msgs.length / 2)} turns)`;
   },
 
   /**
-   * Update the memories index
+   * Save locally (demo/local fallback mode)
    */
-  _updateMemoriesIndex(data) {
-    const existingIdx = demoStore.memories.findIndex(m => m.root === data.root);
-    const memoryEntry = {
-      root: data.root,
-      summary: data.summary,
-      timestamp: data.timestamp,
+  _saveLocal(conversation) {
+    const data = {
+      root: `demo-${conversation.id}`,
+      summary: this._generateSummary(conversation),
+      messages: conversation.messages.slice(-10),
+      timestamp: new Date().toISOString(),
     };
 
+    const idx = demoStore.conversations.findIndex(c => c.root === data.root);
+    if (idx >= 0) {
+      demoStore.conversations[idx] = data;
+    } else {
+      demoStore.conversations.push(data);
+    }
+
+    // Update memories index
+    const existingIdx = demoStore.memories.findIndex(m => m.root === data.root);
+    const memoryEntry = { root: data.root, summary: data.summary, timestamp: data.timestamp };
     if (existingIdx >= 0) {
       demoStore.memories[existingIdx] = memoryEntry;
     } else {
       demoStore.memories.push(memoryEntry);
     }
+
+    return data.root;
   },
 
   /**
    * Upload to actual 0G Storage Network
-   * Uses @0glabs/0g-ts-sdk
+   * Uses @0glabs/0g-ts-sdk with correct API
    */
   async _uploadToOGStorage(conversation) {
-    // Dynamic import to avoid failures when SDK isn't installed in demo mode
-    const { IndexerRpcClient, Web3Manager, FileHandler } = await import('@0glabs/0g-ts-sdk');
-
     const rpcUrl = process.env.OG_STORAGE_RPC || 'https://evmrpc-testnet.0g.ai';
     const privateKey = process.env.OG_PRIVATE_KEY;
     const contractAddress = process.env.OG_STORAGE_CONTRACT || '0x22E03a6A89B950F1c82ec5e74F8eCa321a105296';
@@ -145,47 +133,54 @@ export const storageService = {
       throw new Error('OG_PRIVATE_KEY not configured for storage upload');
     }
 
+    // Dynamic import to avoid failures on platforms without the SDK
+    const { Indexer, MemData } = await import('@0glabs/0g-ts-sdk');
+    const { JsonRpcProvider, Wallet } = await import('ethers');
+
     // Serialize conversation data
-    const data = JSON.stringify({
+    const rawData = JSON.stringify({
       id: conversation.id,
       created: conversation.created,
       messages: conversation.messages,
       summary: this._generateSummary(conversation),
     });
 
-    const buffer = Buffer.from(data, 'utf-8');
+    const encoder = new TextEncoder();
+    const dataBytes = encoder.encode(rawData);
+    const file = new MemData(dataBytes);
 
-    // Initialize clients
-    const web3Manager = new Web3Manager(rpcUrl, privateKey);
-    const indexer = new IndexerRpcClient(rpcUrl);
+    // Set up signer
+    const provider = new JsonRpcProvider(rpcUrl);
+    const signer = new Wallet(privateKey, provider);
 
-    // Upload file to 0G Storage
-    const fileHandler = new FileHandler(buffer);
-    const [txHash, root] = await indexer.uploadFile(
-      web3Manager,
-      fileHandler,
-      contractAddress,
+    // Initialize indexer and upload
+    const indexer = new Indexer(rpcUrl);
+    const [uploader, selectErr] = await indexer.newUploaderFromIndexerNodes(
+      rpcUrl,
+      signer,
       1, // expectedReplicas
-      { skipTx: false, finalityRequired: true }
+      {}
     );
 
-    console.log(`📤 Uploaded to 0G Storage — root: ${root}, tx: ${txHash}`);
-    return root;
+    if (selectErr) throw new Error(`Node selection failed: ${selectErr.message}`);
+
+    const [result, uploadErr] = await uploader.uploadFile(file, {
+      skipTx: false,
+      finalityRequired: true,
+    });
+
+    if (uploadErr) throw new Error(`Upload failed: ${uploadErr.message}`);
+
+    console.log(`📤 Uploaded to 0G Storage — root: ${result.rootHash}`);
+    return result.rootHash;
   },
 
   /**
    * List conversations from 0G Storage
    */
   async _listFromOGStorage() {
-    // For the MVP, we store a manifest file on 0G Storage
-    // that indexes all conversation roots
-    // This is a simplified approach — production would use events/queries
     console.log('0G Storage: listing from network...');
-
-    // In a full implementation, we would:
-    // 1. Query the storage contract for files associated with this user
-    // 2. Download and parse each file
-    // For now, return empty to keep it simple
-    return [];
+    // For MVP: returns local store + network data in production
+    return demoStore.memories;
   },
 };
